@@ -1,5 +1,5 @@
 // Package util provides HTTP helpers, file utilities, Java management, and
-// other shared functionality used across the FTB Server Installer.
+// other shared functionality used across the Server Installer.
 package util
 
 import (
@@ -163,7 +163,7 @@ func IsEmptyDir(path string) (bool, error) {
 	hasNonInstallerFiles := false
 	installerName := filepath.Base(os.Args[0])
 	for _, f := range dir {
-		if !f.IsDir() && (f.Name() == installerName || f.Name() == "ftb-server-installer.log" || f.Name() == "install.bat" || f.Name() == "install.sh" || f.Name() == "README.md") {
+		if !f.IsDir() && (f.Name() == installerName || f.Name() == "server-installer.log" || f.Name() == "install.bat" || f.Name() == "install.sh" || f.Name() == "README.md") {
 			continue
 		}
 		hasNonInstallerFiles = true
@@ -401,7 +401,7 @@ func validJavaArch(version string) (string, error) {
 			return "arm", nil
 		}
 	}
-	return "", errors.New("unsupported architecture, please contact FTB support")
+	return "", errors.New("unsupported architecture, please open an issue at https://github.com/Kiddooo/Server-Installer/issues")
 }
 
 // FileHash computes the hex-encoded hash of a file using the specified algorithm
@@ -600,7 +600,7 @@ func FailedDownloadHandler(attempts, m int, file structs.File, mirror string, mi
 	} else if attempts >= 2 && m == len(mirrors)-1 { // TODO: Validate this
 		return false, false, fmt.Errorf("failed to download file %s from %s, all attempts and mirrors failed", file.Name, mirror)
 	}
-	return false, false, fmt.Errorf("something went wrong, please contact FTB support")
+	return false, false, fmt.Errorf("something went wrong, please open an issue at https://github.com/Kiddooo/Server-Installer/issues")
 }
 
 // RelaunchInTerminal attempts to relaunch the installer in a graphical terminal

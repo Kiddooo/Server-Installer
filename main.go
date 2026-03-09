@@ -71,7 +71,7 @@ func init() {
 		userAgentVersion = strings.TrimPrefix(util.ReleaseVersion, "v")
 	}
 
-	util.UserAgent = fmt.Sprintf("ftb-server-installer/%s", userAgentVersion)
+	util.UserAgent = fmt.Sprintf("server-installer/%s", userAgentVersion)
 }
 
 func main() {
@@ -106,7 +106,7 @@ func main() {
 	}
 
 	var err error
-	logFile, err = os.OpenFile("ftb-server-installer.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	logFile, err = os.OpenFile("server-installer.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 	if err != nil {
 		panic(err)
 	}
@@ -130,6 +130,12 @@ func main() {
 	}
 	pterm.Debug.MessageStyle = pterm.NewStyle(98)
 
+	pterm.Info.Prefix = pterm.Prefix{
+		Text:  "INFO",
+		Style: pterm.NewStyle(pterm.BgYellow, pterm.FgBlack),
+	}
+	pterm.Info.MessageStyle = pterm.NewStyle(pterm.FgYellow)
+
 	if noColours {
 		pterm.DisableStyling()
 	}
@@ -140,7 +146,7 @@ func main() {
 		putils.LettersFromStringWithStyle("B", pterm.NewStyle(pterm.FgRed))).Srender()
 	pterm.DefaultCenter.Println(logo)
 	pterm.DefaultCenter.WithCenterEachLineSeparately().Printfln("Server installer version: %s(%s)\n%s", util.ReleaseVersion, util.GitCommit, time.Now().UTC().Format(time.RFC1123))
-	pterm.DefaultCenter.WithCenterEachLineSeparately().Println(pterm.Bold.Sprintf("Installer Issue tracker\nhttps://github.com/FTBTeam/FTB-Server-Installer/issues"))
+	pterm.DefaultCenter.WithCenterEachLineSeparately().Println(pterm.Bold.Sprintf("Installer Issue tracker\nhttps://github.com/Kiddooo/Server-Installer/issues"))
 
 	versionInfo, err := checkForUpdate()
 	if err != nil {

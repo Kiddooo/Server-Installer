@@ -1,4 +1,4 @@
-// Package structs contains data types for the FTB Server Installer.
+// Package structs contains data types for the Server Installer.
 package structs
 
 // MRProject represents a Modrinth project (modpack).
@@ -7,7 +7,7 @@ type MRProject struct {
 	Slug        string   `json:"slug"`
 	Title       string   `json:"title"`
 	ProjectType string   `json:"project_type"` // "modpack", "mod", etc.
-	Versions    []string `json:"versions"`      // list of version IDs
+	Versions    []string `json:"versions"`     // list of version IDs
 }
 
 // MRVersion represents a specific version of a Modrinth project.

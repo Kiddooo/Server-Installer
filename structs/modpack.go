@@ -1,4 +1,4 @@
-// Package structs contains data types for the FTB Server Installer.
+// Package structs contains data types for the Server Installer.
 package structs
 
 // Modpack represents the metadata for a modpack from any provider.

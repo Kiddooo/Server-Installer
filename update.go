@@ -19,9 +19,9 @@ import (
 
 const (
 	// org is the GitHub organization that owns the installer repository.
-	org = "FTBTeam"
+	org = "Kiddooo"
 	// repo is the GitHub repository name for the installer.
-	repo = "FTB-Server-Installer"
+	repo = "Server-Installer"
 )
 
 // GHRelease represents a GitHub release as returned by the GitHub API.
@@ -102,7 +102,7 @@ func checkForUpdate() (VersionInfo, error) {
 // SHA-256 checksum before replacing the current executable. The process exits
 // after a successful update so the user can restart with the new version.
 func doUpdate(versionInfo VersionInfo) error {
-	filename := fmt.Sprintf("ftb-server-%s-%s", strings.ToLower(runtime.GOOS), strings.ToLower(runtime.GOARCH))
+	filename := fmt.Sprintf("server-installer-%s-%s", strings.ToLower(runtime.GOOS), strings.ToLower(runtime.GOARCH))
 	if runtime.GOOS == "windows" {
 		filename += ".exe"
 	}

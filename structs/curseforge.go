@@ -1,4 +1,4 @@
-// Package structs contains data types for the FTB Server Installer.
+// Package structs contains data types for the Server Installer.
 package structs
 
 // CFModResponse is the top-level CurseForge API response for a single mod.
