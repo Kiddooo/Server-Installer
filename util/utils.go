@@ -256,8 +256,8 @@ func OsJavaExists() bool {
 	return true
 }
 
-// GetJava queries the Adoptium API for the specified Java version and returns
-// a File struct with the download URL and checksum for the platform-appropriate JRE.
+// GetJava queries the Adoptium API for the latest release of the specified Java
+// major version and returns a File struct with the download URL and checksum.
 func GetJava(version string) (structs.File, error) {
 	adoptiumUrl, err := makeAdoptiumUrl(version)
 	if err != nil {
@@ -277,20 +277,26 @@ func GetJava(version string) (structs.File, error) {
 		return structs.File{}, err
 	}
 
+	if len(adoptium) == 0 {
+		return structs.File{}, fmt.Errorf("no JRE found for Java %s on this platform", version)
+	}
+
+	pkg := adoptium[0].Binary.Package
+
 	var fileExt string
-	if strings.HasSuffix(adoptium[0].Binaries[0].Package.Name, ".zip") {
+	if strings.HasSuffix(pkg.Name, ".zip") {
 		fileExt = ".zip"
-	} else if strings.HasSuffix(adoptium[0].Binaries[0].Package.Name, ".tar.gz") {
+	} else if strings.HasSuffix(pkg.Name, ".tar.gz") {
 		fileExt = ".tar.gz"
 	} else {
-		fileExt = "" // shrug
+		fileExt = ""
 	}
 
 	return structs.File{
 		Name:     "jre" + fileExt,
 		Path:     "",
-		Url:      adoptium[0].Binaries[0].Package.Link,
-		Hash:     adoptium[0].Binaries[0].Package.Checksum,
+		Url:      pkg.Link,
+		Hash:     pkg.Checksum,
 		HashType: "sha256",
 	}, nil
 }
@@ -310,32 +316,25 @@ func GetJavaPath(version string) (string, error) {
 	}
 }
 
-// makeAdoptiumUrl builds a URL for the Adoptium API to query JRE downloads
-// for the given Java version, targeting the current OS and architecture.
+// makeAdoptiumUrl builds a URL for the Adoptium API to query the latest JRE
+// release for the given Java major version, targeting the current OS and architecture.
+// Uses the /v3/assets/latest/{version}/hotspot endpoint which accepts bare major
+// version numbers (e.g. "21") unlike /v3/assets/version which requires full semver.
 func makeAdoptiumUrl(version string) (string, error) {
-	parsedUrl, err := url.Parse(adoptiumApiUrl + "/v3/assets/version/" + version)
+	parsedUrl, err := url.Parse(adoptiumApiUrl + "/v3/assets/latest/" + version + "/hotspot")
 	if err != nil {
 		return "", err
 	}
 
 	q := parsedUrl.Query()
-	q.Add("heap_size", "normal")
 	q.Add("image_type", "jre")
-	q.Add("page", "0")
-	q.Add("page_size", "10")
-	q.Add("project", "jdk")
-	q.Add("release_type", "ga")
-	q.Add("semver", "false")
-	q.Add("sort_method", "DEFAULT")
-	q.Add("sort_order", "DESC")
 	q.Add("vendor", "eclipse")
+
 	if runtime.GOOS == "windows" {
 		q.Add("os", "windows")
-	}
-	if runtime.GOOS == "darwin" {
+	} else if runtime.GOOS == "darwin" {
 		q.Add("os", "mac")
-	}
-	if runtime.GOOS == "linux" {
+	} else if runtime.GOOS == "linux" {
 		if _, err := os.Stat("/etc/alpine-release"); !os.IsNotExist(err) {
 			q.Add("os", "alpine-linux")
 		} else {

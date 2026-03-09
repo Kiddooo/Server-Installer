@@ -2,10 +2,10 @@ package structs
 
 import "time"
 
-// Adoptium represents the response from the Adoptium API for JRE version queries.
+// Adoptium represents the response from the Adoptium API /v3/assets/latest endpoint.
 type Adoptium []struct {
-	Binaries    []AdoptiumBinaries `json:"binaries"`
-	ReleaseName string             `json:"release_name"`
+	Binary      AdoptiumBinaries `json:"binary"`
+	ReleaseName string           `json:"release_name"`
 }
 
 // AdoptiumPackage contains download information for an Adoptium binary package.
