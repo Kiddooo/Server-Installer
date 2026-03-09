@@ -141,9 +141,8 @@ func main() {
 	}
 
 	logo, _ := pterm.DefaultBigText.WithLetters(
-		putils.LettersFromStringWithStyle("F", pterm.NewStyle(pterm.FgCyan)),
-		putils.LettersFromStringWithStyle("T", pterm.NewStyle(pterm.FgGreen)),
-		putils.LettersFromStringWithStyle("B", pterm.NewStyle(pterm.FgRed))).Srender()
+		putils.LettersFromStringWithStyle("S", pterm.NewStyle(pterm.FgCyan)),
+		putils.LettersFromStringWithStyle("I", pterm.NewStyle(pterm.FgMagenta))).Srender()
 	pterm.DefaultCenter.Println(logo)
 	pterm.DefaultCenter.WithCenterEachLineSeparately().Printfln("Server installer version: %s(%s)\n%s", util.ReleaseVersion, util.GitCommit, time.Now().UTC().Format(time.RFC1123))
 	pterm.DefaultCenter.WithCenterEachLineSeparately().Println(pterm.Bold.Sprintf("Installer Issue tracker\nhttps://github.com/Kiddooo/Server-Installer/issues"))
