@@ -18,10 +18,13 @@ import (
 )
 
 const (
-	org  = "FTBTeam"
+	// org is the GitHub organization that owns the installer repository.
+	org = "FTBTeam"
+	// repo is the GitHub repository name for the installer.
 	repo = "FTB-Server-Installer"
 )
 
+// GHRelease represents a GitHub release as returned by the GitHub API.
 type GHRelease struct {
 	TagName    string `json:"tag_name"`
 	Name       string `json:"name"`
@@ -29,6 +32,8 @@ type GHRelease struct {
 	Draft      bool   `json:"draft"`
 }
 
+// VersionInfo holds the result of an update check, including whether an update
+// is available and the current/latest version strings.
 type VersionInfo struct {
 	UpdateAvailable     bool
 	CurrentVersion      string
@@ -37,6 +42,9 @@ type VersionInfo struct {
 	isPreReleaseOrDraft bool
 }
 
+// checkForUpdate queries the GitHub API for the latest release and compares it
+// against the current version. Returns a VersionInfo indicating whether an
+// update is available, or an error if the check fails.
 func checkForUpdate() (VersionInfo, error) {
 	var versionInfo = VersionInfo{
 		UpdateAvailable:     false,
@@ -90,6 +98,9 @@ func checkForUpdate() (VersionInfo, error) {
 	return versionInfo, nil
 }
 
+// doUpdate downloads and applies the latest release binary, verifying its
+// SHA-256 checksum before replacing the current executable. The process exits
+// after a successful update so the user can restart with the new version.
 func doUpdate(versionInfo VersionInfo) error {
 	filename := fmt.Sprintf("ftb-server-%s-%s", strings.ToLower(runtime.GOOS), strings.ToLower(runtime.GOARCH))
 	if runtime.GOOS == "windows" {

@@ -1,3 +1,5 @@
+// Package util provides HTTP helpers, file utilities, Java management, and
+// other shared functionality used across the FTB Server Installer.
 package util
 
 import (
@@ -27,23 +29,32 @@ import (
 )
 
 const (
+	// ManifestName is the filename used for the installation manifest.
 	ManifestName   = ".manifest.json"
 	adoptiumApiUrl = "https://api.adoptium.net"
 )
 
 var (
+	// ReleaseVersion is the semantic version of the installer, set at build time via ldflags.
 	ReleaseVersion string
-	GitCommit      string
-	ApiKey         string
-	UserAgent      string
-	LogMw          io.Writer
-	BackoffTimes   = []time.Duration{
+	// GitCommit is the git commit hash of the build, set at build time via ldflags.
+	GitCommit string
+	// ApiKey is the API key used for authenticated FTB API requests.
+	ApiKey string
+	// UserAgent is the User-Agent header value sent with all HTTP requests.
+	UserAgent string
+	// LogMw is the multi-writer used for logging to both stdout and the log file.
+	LogMw io.Writer
+	// BackoffTimes defines the sleep durations between download retry attempts.
+	BackoffTimes = []time.Duration{
 		1 * time.Second,
 		3 * time.Second,
 		10 * time.Second,
 	}
 )
 
+// ParseInstallerName extracts pack and version IDs from the installer executable
+// filename. Expected format: "prefix_<packId>_<versionId>" (version is optional).
 func ParseInstallerName(filename string) (int, int, error) {
 	re := regexp.MustCompile(`^.*?_(\d+)(?:_(\d+))?`)
 	matches := re.FindStringSubmatch(filename)
@@ -66,24 +77,25 @@ func ParseInstallerName(filename string) (int, int, error) {
 }
 
 func makeRequest(method, url string, requestHeaders map[string][]string) (*http.Response, error) {
-	headers := map[string][]string{}
-	for k, v := range requestHeaders {
-		headers[k] = v
-	}
-	headers["User-Agent"] = []string{UserAgent}
-	if ApiKey != "public" && strings.Contains(url, "api.feed-the-beast.com") {
-		headers["Authorization"] = []string{fmt.Sprintf("Bearer %s", ApiKey)}
-	}
-	client := &http.Client{}
 	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header = headers
+	// Use Header.Set to ensure proper canonical key formatting (e.g. "x-api-key" → "X-Api-Key")
+	for k, vals := range requestHeaders {
+		for _, v := range vals {
+			req.Header.Set(k, v)
+		}
+	}
+	req.Header.Set("User-Agent", UserAgent)
+	if ApiKey != "public" && strings.Contains(url, "api.feed-the-beast.com") {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", ApiKey))
+	}
 
-	return client.Do(req)
+	return http.DefaultClient.Do(req)
 }
 
+// DoGet performs an HTTP GET request with default headers (User-Agent, FTB auth).
 func DoGet(url string) (*http.Response, error) {
 	headers := map[string][]string{}
 	resp, err := makeRequest("GET", url, headers)
@@ -93,11 +105,32 @@ func DoGet(url string) (*http.Response, error) {
 	if resp.StatusCode != 200 {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return nil, errors.New(fmt.Sprintf("Error: %d\n%s", resp.StatusCode, b))
+		return nil, fmt.Errorf("Error: %d\n%s", resp.StatusCode, b)
 	}
 	return resp, nil
 }
 
+// DoGetWithHeaders performs an HTTP GET request with custom headers merged on top
+// of the default headers (User-Agent). This is useful for provider-specific
+// authentication (e.g., CurseForge API key, Modrinth auth tokens).
+func DoGetWithHeaders(url string, extraHeaders map[string]string) (*http.Response, error) {
+	headers := map[string][]string{}
+	for k, v := range extraHeaders {
+		headers[k] = []string{v}
+	}
+	resp, err := makeRequest("GET", url, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 200 {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Error: %d\n%s", resp.StatusCode, b)
+	}
+	return resp, nil
+}
+
+// DoHead performs an HTTP HEAD request with default headers (User-Agent, FTB auth).
 func DoHead(url string) (*http.Response, error) {
 	headers := map[string][]string{}
 	resp, err := makeRequest("HEAD", url, headers)
@@ -107,11 +140,13 @@ func DoHead(url string) (*http.Response, error) {
 	if resp.StatusCode != 200 {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return nil, errors.New(fmt.Sprintf("Error: %d\n%s", resp.StatusCode, b))
+		return nil, fmt.Errorf("Error: %d\n%s", resp.StatusCode, b)
 	}
 	return resp, nil
 }
 
+// IsEmptyDir checks whether a directory is empty, ignoring installer-related
+// files (the installer binary itself, log files, install scripts, and README).
 func IsEmptyDir(path string) (bool, error) {
 	dir, err := os.ReadDir(path)
 	if err != nil {
@@ -136,6 +171,9 @@ func IsEmptyDir(path string) (bool, error) {
 	return !hasNonInstallerFiles, nil
 }
 
+// IsEmptyDirRecursive checks whether a directory and all its subdirectories
+// contain no files. Currently unused but retained for potential future use.
+//
 //goland:noinspection GoUnusedExportedFunction
 func IsEmptyDirRecursive(path string) (bool, error) {
 	dir, err := os.ReadDir(path)
@@ -161,6 +199,7 @@ func IsEmptyDirRecursive(path string) (bool, error) {
 	return true, nil
 }
 
+// ReadManifest reads and parses the .manifest.json file from the install directory.
 func ReadManifest(installDir string) (structs.Manifest, error) {
 	pterm.Debug.Println("Reading manifest from", installDir)
 	file, err := os.ReadFile(filepath.Join(installDir, ManifestName))
@@ -176,7 +215,7 @@ func ReadManifest(installDir string) (structs.Manifest, error) {
 	return manifest, nil
 }
 
-// WriteManifest handy function to write the version manifest
+// WriteManifest writes the version manifest to the install directory as .manifest.json.
 func WriteManifest(installDir string, manifest structs.Manifest) error {
 	manifestJson, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -195,6 +234,7 @@ func WriteManifest(installDir string, manifest structs.Manifest) error {
 	return nil
 }
 
+// PathExists checks whether a file or directory exists at the given path.
 func PathExists(path string) (bool, error) {
 	_, err := os.Stat(path)
 	if err == nil {
@@ -206,6 +246,7 @@ func PathExists(path string) (bool, error) {
 	return false, err
 }
 
+// OsJavaExists checks whether the java executable is available on the system PATH.
 func OsJavaExists() bool {
 	path, err := exec.LookPath("java")
 	pterm.Debug.Printfln("Looking for java in %s", path)
@@ -215,6 +256,8 @@ func OsJavaExists() bool {
 	return true
 }
 
+// GetJava queries the Adoptium API for the specified Java version and returns
+// a File struct with the download URL and checksum for the platform-appropriate JRE.
 func GetJava(version string) (structs.File, error) {
 	adoptiumUrl, err := makeAdoptiumUrl(version)
 	if err != nil {
@@ -252,6 +295,8 @@ func GetJava(version string) (structs.File, error) {
 	}, nil
 }
 
+// GetJavaPath returns the platform-specific relative path to the java binary
+// within the bundled JRE directory for the given version.
 func GetJavaPath(version string) (string, error) {
 	switch runtime.GOOS {
 	case "windows":
@@ -265,6 +310,8 @@ func GetJavaPath(version string) (string, error) {
 	}
 }
 
+// makeAdoptiumUrl builds a URL for the Adoptium API to query JRE downloads
+// for the given Java version, targeting the current OS and architecture.
 func makeAdoptiumUrl(version string) (string, error) {
 	parsedUrl, err := url.Parse(adoptiumApiUrl + "/v3/assets/version/" + version)
 	if err != nil {
@@ -307,6 +354,9 @@ func makeAdoptiumUrl(version string) (string, error) {
 	return parsedUrl.String(), nil
 }
 
+// validJavaArch returns the Adoptium architecture string for the current platform
+// and the given Java version. On macOS arm64, versions below 11 fall back to x64
+// since native arm64 JREs were not available before Java 11.
 func validJavaArch(version string) (string, error) {
 	targetVersion, err := semVer.NewVersion(version)
 	if err != nil {
@@ -354,6 +404,8 @@ func validJavaArch(version string) (string, error) {
 	return "", errors.New("unsupported architecture, please contact FTB support")
 }
 
+// FileHash computes the hex-encoded hash of a file using the specified algorithm
+// ("sha1" or "sha256").
 func FileHash(path string, hash string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -379,6 +431,9 @@ func FileHash(path string, hash string) (string, error) {
 	}
 }
 
+// CombineZip merges two ZIP files into a single ZIP at destZip. Used by old
+// Forge versions that distribute as a universal.zip that must be combined
+// with the vanilla server jar.
 func CombineZip(inZip string, destZip string) error {
 	_ = os.Rename(destZip, destZip+".tmp")
 	defer os.Remove(destZip + ".tmp")
@@ -435,6 +490,7 @@ func CombineZip(inZip string, destZip string) error {
 	return nil
 }
 
+// ConfirmYN displays an interactive yes/no prompt with the given text and default value.
 func ConfirmYN(text string, value bool, style *pterm.Style) bool {
 	if style == nil {
 		style = pterm.Info.MessageStyle
@@ -450,6 +506,8 @@ func ConfirmYN(text string, value bool, style *pterm.Style) bool {
 	return show
 }
 
+// CopyDir recursively copies the contents of src into dst.
+//
 //goland:noinspection GoUnusedExportedFunction
 func CopyDir(src string, dst string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
@@ -479,6 +537,7 @@ func CopyDir(src string, dst string) error {
 	})
 }
 
+// CopyFile copies a single file from src to dst.
 func CopyFile(src string, dst string) error {
 	file, err := os.Open(src)
 	if err != nil {
@@ -499,7 +558,8 @@ func CopyFile(src string, dst string) error {
 	return nil
 }
 
-// CustomWriter to strip ascii characters
+// CustomWriter is an io.Writer that strips ANSI escape sequences from output,
+// used to produce clean log file output without terminal formatting codes.
 type CustomWriter struct {
 	writer io.Writer
 }
@@ -524,8 +584,10 @@ func (cw *CustomWriter) Write(p []byte) (n int, err error) {
 	return cw.writer.Write(filtered)
 }
 
-// FailedDownloadHandler handles the download retry logic
-// return format is (attempts, mirror, error)
+// FailedDownloadHandler handles download retry and mirror failover logic.
+// Returns (shouldRetry, tryNextMirror, error). When shouldRetry is true, the
+// caller should retry the same mirror. When tryNextMirror is true, the caller
+// should move to the next mirror. When error is non-nil, all retries are exhausted.
 func FailedDownloadHandler(attempts, m int, file structs.File, mirror string, mirrors []string) (bool, bool, error) {
 	if attempts < 2 {
 		sleepTime := BackoffTimes[attempts]
@@ -541,6 +603,8 @@ func FailedDownloadHandler(attempts, m int, file structs.File, mirror string, mi
 	return false, false, fmt.Errorf("something went wrong, please contact FTB support")
 }
 
+// RelaunchInTerminal attempts to relaunch the installer in a graphical terminal
+// emulator on Linux when the process is not already running in a terminal.
 func RelaunchInTerminal() {
 	executable, err := os.Executable()
 

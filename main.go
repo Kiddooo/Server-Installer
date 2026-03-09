@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
@@ -31,8 +32,8 @@ import (
 )
 
 var (
-	packId        int
-	versionId     int
+	packId        string
+	versionId     string
 	installDir    string
 	threads       int
 	provider      string
@@ -74,15 +75,15 @@ func init() {
 }
 
 func main() {
-	flag.StringVar(&provider, "provider", "ftb", "Modpack provider (Currently only 'ftb' is supported)")
-	flag.IntVar(&packId, "pack", 0, "Modpack ID")
-	flag.IntVar(&versionId, "version", 0, "Modpack version ID, if not provided, the latest version will be used")
+	flag.StringVar(&provider, "provider", "ftb", "Modpack provider ('ftb', 'curseforge', or 'modrinth')")
+	flag.StringVar(&packId, "pack", "", "Modpack ID (numeric for ftb/curseforge, alphanumeric slug or ID for modrinth)")
+	flag.StringVar(&versionId, "version", "", "Modpack version ID, if not provided, the latest version will be used")
 	flag.StringVar(&installDir, "dir", "", "Installation directory")
 	flag.BoolVar(&auto, "auto", false, "Dont ask questions, just install the server")
 	flag.BoolVar(&latest, "latest", false, "Gets the latest (alpha/beta/release) version of the modpack")
 	flag.BoolVar(&force, "force", false, "Force the modpack install, dont ask questions just continue (only works with -auto)")
 	flag.IntVar(&threads, "threads", runtime.NumCPU()*2, "Number of threads to use (Default: number of CPU cores)")
-	flag.StringVar(&apiKey, "apikey", "public", "FTB API key (Only for private FTB modpacks)")
+	flag.StringVar(&apiKey, "apikey", "public", "API key for the selected provider (FTB private packs, CurseForge API key)")
 	flag.BoolVar(&validate, "validate", false, "Validate the modpack after install")
 	flag.BoolVar(&skipModloader, "skip-modloader", false, "Skip installing the modloader")
 	flag.BoolVar(&noJava, "no-java", false, "Do not install Java")
@@ -179,7 +180,7 @@ func main() {
 
 	defer logFile.Close()
 	// Get the pack ID and version ID from the installer name if not provided as flags
-	if packId == 0 {
+	if packId == "" {
 		pId, vId, err := util.ParseInstallerName(filepath.Base(os.Args[0]))
 		if err != nil {
 			pterm.Warning.Println("Unable to parse installer name for modpack and version id:", err)
@@ -188,16 +189,16 @@ func main() {
 				pterm.Fatal.Println(err)
 			}
 		}
-		packId = pId
-		if vId != 0 && versionId == 0 {
-			versionId = vId
+		packId = strconv.Itoa(pId)
+		if vId != 0 && versionId == "" {
+			versionId = strconv.Itoa(vId)
 		}
 	}
 
 	// Get the provider
 	selectedProvider, err := getProvider()
 	if err != nil {
-		pterm.Fatal.Printfln("Error getting provider: %s\nValid providers are 'ftb'", err.Error())
+		pterm.Fatal.Printfln("Error getting provider: %s\nValid providers are 'ftb', 'curseforge', 'modrinth'", err.Error())
 	}
 	pterm.Debug.Printfln("Got provider '%s'", provider)
 
@@ -218,14 +219,14 @@ func main() {
 	pterm.Debug.Printfln("Modpack: %+v", modpack)
 
 	// Get the latest version id if not provided or if the latest flag is set
-	if versionId == 0 || latest {
+	if versionId == "" || latest {
 		latestVersion, err := getLatestRelease(modpack.Versions, latest)
 		if err != nil {
 			pterm.Error.Println("Error getting latest release:", err.Error())
 			os.Exit(1)
 		}
 		selectedProvider.SetVersionId(latestVersion.Id)
-		pterm.Debug.Printfln("No version provided or latest flag set, using latest version: %d", latestVersion.Id)
+		pterm.Debug.Printfln("No version provided or latest flag set, using latest version: %s", latestVersion.Id)
 	}
 
 	// Get the version information for the modpack from the provider
@@ -235,6 +236,9 @@ func main() {
 		pterm.Error.Println("Error getting modpack version:", err.Error())
 		os.Exit(1)
 	}
+	// Ensure any temp files (downloaded zips) are cleaned up on all exit paths.
+	// PrepareFiles also removes them, so this is a safe no-op if we get that far.
+	defer selectedProvider.Cleanup()
 	filesToDownload = append(filesToDownload, modpackVersion.Files...)
 
 	// build the version manifest
@@ -243,6 +247,7 @@ func main() {
 		Name:           modpack.Name,
 		VersionName:    modpackVersion.Name,
 		VersionId:      modpackVersion.Id,
+		Provider:       provider,
 		ModpackTargets: modpackVersion.Targets,
 		Files:          modpackVersion.Files,
 	}
@@ -267,6 +272,7 @@ func main() {
 	var updatedFiles, removedFiles, unchangedFiles []structs.File
 	updateMsg := ""
 	isUpdate := false
+	var previousManifest structs.Manifest
 	if exists {
 		manifestExists, err := util.PathExists(filepath.Join(installDir, util.ManifestName))
 		if err != nil {
@@ -303,6 +309,7 @@ func main() {
 				selectedProvider.FailedInstall()
 				pterm.Fatal.Println("Error reading manifest:", err.Error())
 			}
+			previousManifest = existingManifest
 
 			/*
 				Check the manifest to see if it's the same modpack installed, if it's not the same modpack then ask the user
@@ -372,13 +379,53 @@ func main() {
 	filesToDownload = append(filesToDownload, mlDownloads...)
 
 	if isUpdate {
-		updateMsg = fmt.Sprintf("\nUnchanged Files: %d\nFiles changed: %d\nFiles removed: %d", len(unchangedFiles), len(updatedFiles), len(removedFiles))
+		updateMsg = fmt.Sprintf("\nUpdate: %s (%s) → %s (%s)",
+			previousManifest.VersionName, previousManifest.VersionId,
+			modpackVersion.Name, modpackVersion.Id,
+		)
+		if previousManifest.ModpackTargets.McVersion != modpackVersion.Targets.McVersion && modpackVersion.Targets.McVersion != "" {
+			updateMsg += fmt.Sprintf("\nMinecraft: %s → %s", previousManifest.ModpackTargets.McVersion, modpackVersion.Targets.McVersion)
+		}
+		if previousManifest.ModpackTargets.ModLoader.Version != modpackVersion.Targets.ModLoader.Version && modpackVersion.Targets.ModLoader.Version != "" {
+			updateMsg += fmt.Sprintf("\n%s: %s → %s",
+				modpackVersion.Targets.ModLoader.Name,
+				previousManifest.ModpackTargets.ModLoader.Version,
+				modpackVersion.Targets.ModLoader.Version,
+			)
+		}
+		updateMsg += fmt.Sprintf("\nUnchanged: %d | Changed: %d | Removed: %d", len(unchangedFiles), len(updatedFiles), len(removedFiles))
+		updateMsg += fileListSummary("Changed", updatedFiles)
+		updateMsg += fileListSummary("Removed", removedFiles)
 	}
 
 	pterm.Debug.Printfln("Files to download: %d", len(filesToDownload))
 
 	// Show a quick overview of the pack they are installing then ask if they want to continue with downloading the pack
-	pterm.Info.Printfln("Fetched modpack:\nName: %s (%d)\nVersion: %s (%d)\nModLoader: %s (%s)\nIs Update: %t%s\nInstall Path: %s", modpack.Name, modpack.Id, modpackVersion.Name, modpackVersion.Id, modpackVersion.Targets.ModLoader.Name, modpackVersion.Targets.ModLoader.Version, isUpdate, updateMsg, installDir)
+	memStr := ""
+	if modpackVersion.Memory.Recommended > 0 {
+		memStr = fmt.Sprintf("\nMemory: %d MB", modpackVersion.Memory.Recommended)
+		if modpackVersion.Memory.Minimum > 0 {
+			memStr += fmt.Sprintf(" (min: %d MB)", modpackVersion.Memory.Minimum)
+		}
+	}
+	packFormatStr := ""
+	if modpackVersion.PackFormat != "" {
+		packFormatStr = fmt.Sprintf("\nPack Format: %s", modpackVersion.PackFormat)
+	}
+	pterm.Info.Printfln("Fetched modpack:\nName: %s (%s)\nProvider: %s\nVersion: %s (%s)\nMinecraft: %s\nModLoader: %s (%s)\nJava: %s\nFiles: %d\nThreads: %d%s%s\nIs Update: %t%s\nInstall Path: %s",
+		modpack.Name, modpack.Id,
+		provider,
+		modpackVersion.Name, modpackVersion.Id,
+		modpackVersion.Targets.McVersion,
+		modpackVersion.Targets.ModLoader.Name, modpackVersion.Targets.ModLoader.Version,
+		modpackVersion.Targets.JavaVersion,
+		len(filesToDownload),
+		threads,
+		memStr,
+		packFormatStr,
+		isUpdate, updateMsg,
+		installDir,
+	)
 	if !auto {
 		cont := util.ConfirmYN("Do you want to continue?", true, pterm.Info.MessageStyle)
 		if !cont {
@@ -455,6 +502,13 @@ func main() {
 
 	pterm.Success.Printfln("Modpack files downloaded")
 
+	// Run provider-specific post-download steps (e.g., extracting overrides from CF/Modrinth archives)
+	err = selectedProvider.PrepareFiles(installDir)
+	if err != nil {
+		selectedProvider.FailedInstall()
+		pterm.Fatal.Println("Error preparing provider files:", err.Error())
+	}
+
 	// If we downloaded java, extract the files to a jre folder
 	if !noJava && !jreAlreadyExists {
 
@@ -530,15 +584,6 @@ func main() {
 		pterm.Fatal.Println("Error creating manifest:", err.Error())
 	}
 
-	/*// Ask if the user would like to copy the overrides
-	overridesExist, err := util.PathExists(filepath.Join(installDir, "overrides"))
-	if err != nil {
-		pterm.Fatal.Println("Error checking if overrides exists:", err.Error())
-	}
-	if overridesExist {
-		copyOverriddenFiles()
-	}*/
-
 	selectedProvider.SuccessfulInstall()
 	if acceptEula {
 		// set eula=true in the eula.txt file
@@ -551,25 +596,44 @@ func main() {
 	pterm.Success.Println("Modpack installed successfully")
 }
 
-// getProvider Gets and sets up the repo provider
+// getProvider creates and returns the appropriate ModpackRepo implementation
+// based on the -provider flag. It also handles API key resolution from
+// environment variables when the key is not explicitly provided.
 func getProvider() (repos.ModpackRepo, error) {
+	// Resolve API key from environment variables if not explicitly set.
+	// Provider-specific env vars take priority over the generic FTB key.
 	if apiKey == "public" {
-		if envAPIKey, ok := os.LookupEnv("FTB_MODPACK_API_KEY"); ok {
-			apiKey = envAPIKey
+		switch provider {
+		case "curseforge":
+			if envAPIKey, ok := os.LookupEnv("CURSEFORGE_API_KEY"); ok {
+				apiKey = envAPIKey
+			}
+		default:
+			if envAPIKey, ok := os.LookupEnv("FTB_MODPACK_API_KEY"); ok {
+				apiKey = envAPIKey
+			}
 		}
 	}
+	// Set the global API key for FTB auth in util.makeRequest
 	util.ApiKey = apiKey
+
 	switch provider {
 	case "ftb":
 		return repos.GetFTB(packId, versionId), nil
-	// case "curseforge":
-	//	return repos.GetCurseForge(packId, versionId), nil
+	case "curseforge":
+		if apiKey == "public" || apiKey == "" {
+			return nil, fmt.Errorf("CurseForge requires an API key. Set -apikey or the CURSEFORGE_API_KEY environment variable.\nGet a key at https://console.curseforge.com")
+		}
+		return repos.GetCurseForge(packId, versionId, apiKey)
+	case "modrinth":
+		return repos.GetModrinth(packId, versionId), nil
 	default:
-		return nil, errors.New(fmt.Sprintf("'%s' not recognised", provider))
+		return nil, fmt.Errorf("'%s' not recognised. Valid providers: ftb, curseforge, modrinth", provider)
 	}
 }
 
-// getModLoader function to get the correct modloader for the pack
+// getModLoader returns the correct modloader implementation for the pack's
+// modloader target (forge, neoforge, or fabric).
 func getModLoader(targets structs.ModpackTargets, memory structs.Memory) (modloaders.ModLoader, error) {
 	switch targets.ModLoader.Name {
 	case "neoforge":
@@ -579,10 +643,12 @@ func getModLoader(targets structs.ModpackTargets, memory structs.Memory) (modloa
 	case "forge":
 		return modloaders.GetForge(targets, memory, installDir), nil
 	default:
-		return nil, errors.New(fmt.Sprintf("'%s' not recognised", targets.ModLoader.Name))
+		return nil, fmt.Errorf("'%s' not recognised", targets.ModLoader.Name)
 	}
 }
 
+// downloadFiles downloads all given files concurrently using the configured
+// number of threads. It displays a progress bar during the download.
 func downloadFiles(files ...structs.File) error {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -628,9 +694,15 @@ func downloadFiles(files ...structs.File) error {
 	return nil
 }
 
+// doDownload handles downloading a single file with retry logic and mirror
+// failover. Each mirror is attempted up to 3 times with exponential backoff
+// before moving to the next mirror.
 func doDownload(file structs.File) error {
 	destPath := filepath.Join(installDir, file.Path, file.Name)
 	mirrors := append([]string{file.Url}, file.Mirrors...)
+	// MirrorHeaders is parallel to file.Mirrors (index 0 = primary URL has no
+	// extra headers; index i+1 corresponds to file.MirrorHeaders[i]).
+	mirrorHeaders := append([]map[string]string{nil}, file.MirrorHeaders...)
 
 	for m, mirror := range mirrors {
 		for attempts := 0; attempts < 3; attempts++ {
@@ -649,7 +721,10 @@ func doDownload(file structs.File) error {
 				}
 			}
 			if dl == nil {
-				return errors.New(fmt.Sprintf("download object is nil for file %s", file.Name))
+				return fmt.Errorf("download object is nil for file %s", file.Name)
+			}
+			if m < len(mirrorHeaders) && mirrorHeaders[m] != nil {
+				dl.SetHeaders(mirrorHeaders[m])
 			}
 			if file.Hash != "" {
 				hexHash, _ := hex.DecodeString(file.Hash)
@@ -658,11 +733,14 @@ func doDownload(file structs.File) error {
 					dl.SetChecksum(sha1.New(), hexHash, true)
 				case "sha256":
 					dl.SetChecksum(sha256.New(), hexHash, true)
+				case "md5":
+					dl.SetChecksum(md5.New(), hexHash, true)
 				default:
 					pterm.Warning.Printfln("Unsupported hash type: %s", file.HashType)
 				}
 			}
 			dl.CheckContentLength(file.CheckContentLength)
+			dl.SetTimeout(time.Duration(dlTimeout) * time.Second)
 			err = dl.Do()
 			if err != nil {
 				pterm.Error.Printfln("Download request error: %s", err.Error())
@@ -677,21 +755,14 @@ func doDownload(file structs.File) error {
 			}
 
 			return nil
-			/*if attempts < 2 {
-				sleepTime := util.BackoffTimes[attempts]
-				pterm.Warning.Printfln("Failed to download file %s from %s, retrying in %s", file.Name, mirror, sleepTime.String())
-				time.Sleep(sleepTime)
-			} else if attempts >= 2 && m < len(mirrors)-1 {
-				pterm.Warning.Printfln("Failed to download file %s from %s, trying next mirror", file.Name, mirror)
-				break
-			} else if attempts >= 2 && m == len(mirrors)-1 {
-				return fmt.Errorf("failed to download file %s from %s, all attempts and mirrors failed", file.Name, mirror)
-			}*/
 		}
 	}
 	return nil
 }
 
+// runValidation verifies the checksums of all downloaded files against the
+// expected hashes in the manifest. Files that fail validation can optionally
+// be re-downloaded.
 func runValidation(manifest structs.Manifest) error {
 	var invalidFiles []structs.File
 	for _, f := range manifest.Files {
@@ -729,52 +800,58 @@ func runValidation(manifest structs.Manifest) error {
 	return nil
 }
 
+// isSameModpack checks whether two manifests refer to the same modpack
+// by comparing their IDs.
 func isSameModpack(currentManifest, newManifest structs.Manifest) bool {
-	if currentManifest.Id != newManifest.Id {
-		return false
-	}
-
-	return true
+	return currentManifest.Id == newManifest.Id
 }
 
+// isSameModpackVersion checks whether two manifests refer to the same
+// modpack AND version.
 func isSameModpackVersion(currentManifest, newManifest structs.Manifest) bool {
-	if currentManifest.Id != newManifest.Id {
-		return false
-	}
-	if currentManifest.VersionId != newManifest.VersionId {
-		return false
-	}
-
-	return true
+	return currentManifest.Id == newManifest.Id && currentManifest.VersionId == newManifest.VersionId
 }
 
+// checkUpdate determines if the version change is an upgrade or downgrade
+// and prompts the user for confirmation on downgrades.
 func checkUpdate(currentManifest, newManifest structs.Manifest) (isUpdate bool, err error) {
 	if currentManifest.Id != newManifest.Id {
 		return false, errors.New("mismatched modpack")
 	}
 
 	if currentManifest.VersionId != newManifest.VersionId {
-		if newManifest.VersionId > currentManifest.VersionId {
-			return true, nil
-		}
-		if newManifest.VersionId < currentManifest.VersionId {
-			if !auto {
-				show := util.ConfirmYN(
-					fmt.Sprintf("%s will be downgraded from %s to version %s, are you sure you want to downgrade?", newManifest.Name, currentManifest.VersionName, newManifest.VersionName),
-					false,
-					pterm.Warning.MessageStyle,
-				)
-				if !show {
-					pterm.Info.Println("Cancelling update...")
-					os.Exit(0)
+		// For string-based version IDs, we can't always compare numerically.
+		// Try numeric comparison first, fall back to treating any difference as an update.
+		curNum, errCur := strconv.Atoi(currentManifest.VersionId)
+		newNum, errNew := strconv.Atoi(newManifest.VersionId)
+
+		if errCur == nil && errNew == nil {
+			// Both are numeric - compare as integers
+			if newNum > curNum {
+				return true, nil
+			}
+			if newNum < curNum {
+				if !auto {
+					show := util.ConfirmYN(
+						fmt.Sprintf("%s will be downgraded from %s to version %s, are you sure you want to downgrade?", newManifest.Name, currentManifest.VersionName, newManifest.VersionName),
+						false,
+						pterm.Warning.MessageStyle,
+					)
+					if !show {
+						pterm.Info.Println("Cancelling update...")
+						os.Exit(0)
+					}
 				}
+				if auto && !force {
+					pterm.Warning.Printfln("Cancelling update... %s would be downgraded from %s to %s. To force this downgrade use the -force flag", newManifest.Name, currentManifest.VersionName, newManifest.VersionName)
+					os.Exit(1)
+				} else if auto && force {
+					pterm.Warning.Printfln("Forcing downgrade")
+				}
+				return true, nil
 			}
-			if auto && !force {
-				pterm.Warning.Printfln("Cancelling update... %s would be downgraded from %s to %s. To force this downgrade use the -force flag", newManifest.Name, currentManifest.VersionName, newManifest.VersionName)
-				os.Exit(1)
-			} else if auto && force {
-				pterm.Warning.Printfln("Forcing downgrade")
-			}
+		} else {
+			// Non-numeric IDs (e.g., Modrinth) - treat any version change as an update
 			return true, nil
 		}
 	} else {
@@ -784,32 +861,135 @@ func checkUpdate(currentManifest, newManifest structs.Manifest) (isUpdate bool, 
 	return currentManifest.VersionId != newManifest.VersionId, nil
 }
 
+// fileListSummary builds a formatted string listing files under a label.
+// In verbose mode all files are shown; otherwise the list is capped at 10
+// with a "... and N more" suffix. For updated files, if UpdatedName is set
+// the entry is shown as "old → new" to make renames visible.
+func fileListSummary(label string, files []structs.File) string {
+	if len(files) == 0 {
+		return ""
+	}
+	const cap = 10
+	s := fmt.Sprintf("\n%s:", label)
+	limit := len(files)
+	if !verbose && limit > cap {
+		limit = cap
+	}
+	for _, f := range files[:limit] {
+		if f.UpdatedName != "" && f.UpdatedName != f.Name {
+			s += fmt.Sprintf("\n  - %s → %s", f.Name, f.UpdatedName)
+		} else {
+			s += fmt.Sprintf("\n  - %s", f.Name)
+		}
+	}
+	if !verbose && len(files) > cap {
+		s += fmt.Sprintf("\n  ... and %d more", len(files)-cap)
+	}
+	return s
+}
+
+// computeUpdatedFiles compares two file lists and categorizes files into
+// updated (hash changed or renamed), removed (no longer present), and unchanged.
+// Matching priority: stable ID > hash > name+path > filename stem. This correctly
+// handles mod version bumps where the filename changes between versions.
 func computeUpdatedFiles(currentFiles, newFiles []structs.File) (updatedFiles, removedFiles, unchangedFiles []structs.File, err error) {
-	for _, v1 := range currentFiles {
-		fileFound := false
-		fileChanged := false
-		for _, v2 := range newFiles {
-			if v1.Name == v2.Name && v1.Path == v2.Path {
-				// file still exists, so check if it has changed
-				if v1.Hash != v2.Hash {
-					fileChanged = true
-				} else {
-					unchangedFiles = append(unchangedFiles, v1)
+	// Build lookup indices over new files for O(1) access.
+	newByID := make(map[string]structs.File, len(newFiles))
+	newByHash := make(map[string]structs.File, len(newFiles))
+	newByKey := make(map[string]structs.File, len(newFiles))
+	newByStem := make(map[string]structs.File, len(newFiles))
+	for _, f := range newFiles {
+		if f.ID != "" {
+			newByID[f.ID] = f
+		}
+		if f.Hash != "" {
+			newByHash[f.Hash] = f
+		}
+		newByKey[f.Path+"/"+f.Name] = f
+		if stem := modStem(f.Name); stem != "" {
+			newByStem[f.Path+"/"+stem] = f
+		}
+	}
+
+	for _, old := range currentFiles {
+		var matched *structs.File
+
+		// 1. Match by stable project ID (works for installs with new code)
+		if old.ID != "" {
+			if nf, ok := newByID[old.ID]; ok {
+				matched = &nf
+			}
+		}
+		// 2. Match by hash (unchanged file, possibly renamed)
+		if matched == nil && old.Hash != "" {
+			if nf, ok := newByHash[old.Hash]; ok {
+				matched = &nf
+			}
+		}
+		// 3. Exact name+path match
+		if matched == nil {
+			if nf, ok := newByKey[old.Path+"/"+old.Name]; ok {
+				matched = &nf
+			}
+		}
+		// 4. Stem match — handles version-bumped filenames in old manifests
+		// that predate the ID field (e.g. sophisticatedbackpacks-1.18.2-3.18.37→3.18.40)
+		if matched == nil {
+			if stem := modStem(old.Name); stem != "" {
+				if nf, ok := newByStem[old.Path+"/"+stem]; ok {
+					matched = &nf
 				}
-				fileFound = true
 			}
 		}
 
-		if !fileFound {
-			removedFiles = append(removedFiles, v1)
-		} else if fileChanged {
-			updatedFiles = append(updatedFiles, v1)
+		if matched == nil {
+			removedFiles = append(removedFiles, old)
+			continue
+		}
+
+		if matched.Hash != old.Hash {
+			// File changed — store old file for deletion, set UpdatedName for display
+			display := old
+			display.UpdatedName = matched.Name
+			updatedFiles = append(updatedFiles, display)
+		} else {
+			unchangedFiles = append(unchangedFiles, old)
 		}
 	}
 
 	return
 }
 
+// modStem returns the stable name prefix of a mod jar filename by stripping the
+// trailing version segment. It looks for the last '-' followed by a digit and
+// removes everything from that point (including the .jar extension).
+//
+// Examples:
+//
+//	sophisticatedbackpacks-1.18.2-3.18.37.763.jar → sophisticatedbackpacks-1.18.2
+//	EnchantmentDescriptions-Forge-1.18.2-10.0.10.jar → EnchantmentDescriptions-Forge-1.18.2
+//	balm-3.2.1+0.jar → balm
+func modStem(filename string) string {
+	name := strings.TrimSuffix(filename, ".jar")
+	// Walk backwards through '-' separated segments; drop trailing version segments
+	// (those that start with a digit or contain only digits/dots/plus).
+	for {
+		idx := strings.LastIndex(name, "-")
+		if idx < 0 {
+			break
+		}
+		seg := name[idx+1:]
+		if len(seg) > 0 && (seg[0] >= '0' && seg[0] <= '9') {
+			name = name[:idx]
+		} else {
+			break
+		}
+	}
+	return name
+}
+
+// removeUnchangedFiles filters out unchanged files from the download list
+// to avoid redundant downloads during updates.
 func removeUnchangedFiles(files []structs.File, unchangedFiles []structs.File) []structs.File {
 	// removed unchanged files from files
 	for _, f := range unchangedFiles {
@@ -822,6 +1002,9 @@ func removeUnchangedFiles(files []structs.File, unchangedFiles []structs.File) [
 	return files
 }
 
+// getLatestRelease finds the latest version from the version list. If the
+// latest flag is false, only stable releases are considered; if true, the
+// first version (alpha/beta/release) is returned.
 func getLatestRelease(versions []structs.ModpackV, latest bool) (structs.ModpackV, error) {
 	pterm.Debug.Printfln("versions: %+v", versions)
 	for _, v := range versions {
@@ -839,6 +1022,7 @@ func getLatestRelease(versions []structs.ModpackV, latest bool) (structs.Modpack
 	return structs.ModpackV{}, errors.New("no release found, please rerun the installer with the -version flag")
 }
 
+// modpackQuestion interactively prompts the user for the modpack and version IDs.
 func modpackQuestion() (int, int, error) {
 	sPId, _ := pterm.DefaultInteractiveTextInput.
 		WithDefaultText("Please enter the modpack ID").
@@ -865,19 +1049,3 @@ func modpackQuestion() (int, int, error) {
 
 	return pId, vId, nil
 }
-
-/*func copyOverriddenFiles() {
-	pterm.Info.Printfln("Overrides folder found")
-	doCopy := true
-	if !auto {
-		doCopy = util.ConfirmYN("Would you like to copy the overrides folder contents?", true, pterm.Info.MessageStyle)
-	} else {
-		pterm.Info.Printfln("Copying overrides folder contents")
-	}
-	if doCopy {
-		err := util.CopyDir(filepath.Join(installDir, "overrides"), filepath.Join(installDir))
-		if err != nil {
-			pterm.Fatal.Println("Error copying overrides folder:", err.Error())
-		}
-	}
-}*/

@@ -8,6 +8,7 @@ require (
 	github.com/minio/selfupdate v0.6.0
 	github.com/pterm/pterm v0.12.82
 	golang.org/x/term v0.39.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

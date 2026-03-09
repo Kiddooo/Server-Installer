@@ -1,3 +1,4 @@
+// Package repos contains modpack provider implementations.
 package repos
 
 import (
@@ -6,6 +7,7 @@ import (
 	"ftb-server-downloader/structs"
 	"ftb-server-downloader/util"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/pterm/pterm"
@@ -15,18 +17,27 @@ const (
 	ftbApiUrl = "https://api.feed-the-beast.com/v1/modpacks"
 )
 
+// FTB implements the ModpackRepo interface for Feed The Beast modpacks.
 type FTB struct {
 	PackId    int
 	VersionId int
 }
 
-func GetFTB(packId, versionId int) *FTB {
+// GetFTB creates a new FTB provider with the given pack and version IDs.
+// The IDs are provided as strings and parsed to integers since the FTB API
+// uses numeric identifiers.
+func GetFTB(packId, versionId string) *FTB {
+	pId, _ := strconv.Atoi(packId)
+	vId, _ := strconv.Atoi(versionId)
 	return &FTB{
-		PackId:    packId,
-		VersionId: versionId,
+		PackId:    pId,
+		VersionId: vId,
 	}
 }
 
+// GetModpack fetches modpack metadata from the FTB API and returns it in
+// the common Modpack format. The version list is sorted in descending order
+// by ID so that the latest version appears first.
 func (m *FTB) GetModpack() (structs.Modpack, error) {
 	url := fmt.Sprintf("%s/modpack/%d", ftbApiUrl, m.PackId)
 	pterm.Debug.Printfln("Getting modpack from ftb using %s", url)
@@ -50,23 +61,27 @@ func (m *FTB) GetModpack() (structs.Modpack, error) {
 	var versionList []structs.ModpackV
 	for _, v := range ftbModpack.Versions {
 		ver := structs.ModpackV{
-			Id:   v.ID,
+			Id:   strconv.Itoa(v.ID),
 			Type: strings.ToLower(v.Type),
 		}
 		versionList = append(versionList, ver)
 	}
 
 	sort.Slice(versionList, func(i, j int) bool {
-		return versionList[i].Id > versionList[j].Id
+		iId, _ := strconv.Atoi(versionList[i].Id)
+		jId, _ := strconv.Atoi(versionList[j].Id)
+		return iId > jId
 	})
 
 	return structs.Modpack{
 		Name:     ftbModpack.Name,
-		Id:       ftbModpack.ID,
+		Id:       strconv.Itoa(ftbModpack.ID),
 		Versions: versionList,
 	}, nil
 }
 
+// GetVersion fetches version details from the FTB API including file lists,
+// modloader targets, and memory specifications.
 func (m *FTB) GetVersion() (structs.ModpackVersion, error) {
 	url := fmt.Sprintf("%s/modpack/%d/%d", ftbApiUrl, m.PackId, m.VersionId)
 	pterm.Debug.Printfln("Getting modpack version from ftb using %s", url)
@@ -92,14 +107,16 @@ func (m *FTB) GetVersion() (structs.ModpackVersion, error) {
 	mem.Recommended = ftbModpackVer.Specs.Recommended
 
 	return structs.ModpackVersion{
-		Id:      ftbModpackVer.ID,
-		Name:    ftbModpackVer.Name,
-		Targets: parseFTBTargets(ftbModpackVer.Targets),
-		Memory:  mem,
-		Files:   parseFTBFiles(ftbModpackVer.Files),
+		Id:         strconv.Itoa(ftbModpackVer.ID),
+		Name:       ftbModpackVer.Name,
+		Targets:    parseFTBTargets(ftbModpackVer.Targets),
+		Memory:     mem,
+		Files:      parseFTBFiles(ftbModpackVer.Files),
+		PackFormat: "FTB",
 	}, nil
 }
 
+// SuccessfulInstall notifies the FTB API that the server was installed successfully.
 func (m *FTB) SuccessfulInstall() {
 	url := fmt.Sprintf("%s/modpack/%d/%d/serverInstall/success", ftbApiUrl, m.PackId, m.VersionId)
 	resp, err := util.DoGet(url)
@@ -110,6 +127,7 @@ func (m *FTB) SuccessfulInstall() {
 	_ = resp.Body.Close()
 }
 
+// FailedInstall notifies the FTB API that the server installation failed.
 func (m *FTB) FailedInstall() {
 	url := fmt.Sprintf("%s/modpack/%d/%d/serverInstall/failure", ftbApiUrl, m.PackId, m.VersionId)
 	resp, err := util.DoGet(url)
@@ -120,14 +138,22 @@ func (m *FTB) FailedInstall() {
 	_ = resp.Body.Close()
 }
 
-func (m *FTB) SetVersionId(versionId int) {
-	m.VersionId = versionId
+// SetVersionId sets the version to fetch. The string value is parsed to int.
+func (m *FTB) SetVersionId(versionId string) {
+	m.VersionId, _ = strconv.Atoi(versionId)
 }
 
-//func makeFTBUrl(m *FTB) string {
-//	return fmt.Sprintf("%s/%s", ftbApiUrl, m.ApiKey)
-//}
+// PrepareFiles is a no-op for FTB since files are downloaded directly
+// without needing archive extraction or override processing.
+func (m *FTB) PrepareFiles(installDir string) error {
+	return nil
+}
 
+// Cleanup is a no-op for FTB since no temporary files are created during GetVersion.
+func (m *FTB) Cleanup() {}
+
+// parseFTBTargets extracts the modloader, Minecraft, and Java version info
+// from the FTB targets array into the common ModpackTargets struct.
 func parseFTBTargets(targets []structs.FTBTargets) structs.ModpackTargets {
 	var modpackTargets structs.ModpackTargets
 	for _, t := range targets {
@@ -145,11 +171,14 @@ func parseFTBTargets(targets []structs.FTBTargets) structs.ModpackTargets {
 	return modpackTargets
 }
 
+// parseFTBFiles converts FTB file entries to the common File format,
+// filtering out client-only files since this is a server installer.
 func parseFTBFiles(files []structs.FTBFiles) []structs.File {
 	var parsedFiles []structs.File
 	for _, f := range files {
 		if !f.ClientOnly {
 			parsedFiles = append(parsedFiles, structs.File{
+				ID:       strconv.Itoa(f.ID),
 				Name:     f.Name,
 				Path:     f.Path,
 				Url:      f.URL,

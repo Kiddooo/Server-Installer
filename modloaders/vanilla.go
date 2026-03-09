@@ -8,14 +8,20 @@ import (
 	"ftb-server-downloader/util"
 )
 
+// launcherMeta is the URL for Mojang's version manifest, which lists all
+// available Minecraft versions and their metadata URLs.
 const launcherMeta = "https://launchermeta.mojang.com/mc/game/version_manifest.json"
 
+// Vanilla implements the ModLoader interface for unmodified (vanilla) Minecraft servers.
+// It downloads the official server JAR directly from Mojang.
 type Vanilla struct {
 	InstallDir string
 	Version    string
 	Meta       LauncherMeta
 }
 
+// GetVanilla creates a new Vanilla instance by fetching Mojang's launcher metadata
+// to resolve the server download URL for the target Minecraft version.
 func GetVanilla(target structs.ModpackTargets, installDir string) (Vanilla, error) {
 
 	rawMeta, err := util.DoGet(launcherMeta)
@@ -37,6 +43,8 @@ func GetVanilla(target structs.ModpackTargets, installDir string) (Vanilla, erro
 	}, nil
 }
 
+// GetDownload resolves the vanilla server JAR download URL from Mojang's version
+// manifest and returns it as a single-element file list with SHA-1 checksum verification.
 func (v Vanilla) GetDownload() ([]structs.File, error) {
 	var mlFiles []structs.File
 
@@ -74,23 +82,33 @@ func (v Vanilla) GetDownload() ([]structs.File, error) {
 	return mlFiles, nil
 }
 
+// Install is a no-op for vanilla servers since no mod loader installation is needed.
 func (v Vanilla) Install(bool) error {
 	return nil
 }
 
+// LauncherMeta represents Mojang's version manifest containing all available
+// Minecraft versions and their metadata URLs.
 type LauncherMeta struct {
 	Latest   VanillaLatest     `json:"latest"`
 	Versions []VanillaVersions `json:"versions"`
 }
+
+// VanillaLatest holds the latest release and snapshot version IDs.
 type VanillaLatest struct {
 	Release  string `json:"release"`
 	Snapshot string `json:"snapshot"`
 }
+
+// VanillaVersions represents a single entry in the Mojang version manifest,
+// containing the version ID and the URL to its detailed metadata.
 type VanillaVersions struct {
 	ID  string `json:"id"`
 	URL string `json:"url"`
 }
 
+// VanillaVersion holds the detailed metadata for a specific Minecraft version,
+// including the server JAR download URL and SHA-1 hash.
 type VanillaVersion struct {
 	Downloads struct {
 		Server struct {

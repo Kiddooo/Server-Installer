@@ -2,6 +2,7 @@ package modloaders
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"ftb-server-downloader/structs"
 	"ftb-server-downloader/util"
@@ -13,8 +14,10 @@ import (
 	"github.com/pterm/pterm"
 )
 
+// fabricMeta is the base URL for the Fabric metadata API.
 const fabricMeta = "https://meta.fabricmc.net"
 
+// Fabric implements the ModLoader interface for Fabric-based servers.
 type Fabric struct {
 	InstallDir      string
 	Targets         structs.ModpackTargets
@@ -23,6 +26,8 @@ type Fabric struct {
 	FabricInstaller FabricInstaller
 }
 
+// FabricInstaller represents an available Fabric installer release
+// as returned by the Fabric metadata API.
 type FabricInstaller struct {
 	URL     string `json:"url"`
 	Maven   string `json:"maven"`
@@ -30,6 +35,8 @@ type FabricInstaller struct {
 	Stable  bool   `json:"stable"`
 }
 
+// GetFabric creates a new Fabric instance by fetching the latest installer
+// version from the Fabric metadata API.
 func GetFabric(target structs.ModpackTargets, memory structs.Memory, installDir string) (Fabric, error) {
 	fabricInstaller, err := getInstaller()
 	if err != nil {
@@ -44,6 +51,7 @@ func GetFabric(target structs.ModpackTargets, memory structs.Memory, installDir 
 	}, nil
 }
 
+// GetDownload returns the Fabric installer JAR file to download.
 func (s Fabric) GetDownload() ([]structs.File, error) {
 	var mlFiles []structs.File
 
@@ -56,6 +64,9 @@ func (s Fabric) GetDownload() ([]structs.File, error) {
 	return mlFiles, nil
 }
 
+// Install runs the Fabric installer JAR with the appropriate Minecraft and loader
+// versions, then generates a start script. If useOwnJava is true, the bundled JRE
+// is used instead of the system Java.
 func (s Fabric) Install(useOwnJava bool) error {
 	installerName := fmt.Sprintf("fabric-installer-%s.jar", s.FabricInstaller.Version)
 	exists, err := util.PathExists(filepath.Join(s.InstallDir, installerName))
@@ -87,9 +98,10 @@ func (s Fabric) Install(useOwnJava bool) error {
 		return fmt.Errorf("error running fabric installer: %s", err.Error())
 	}
 	if err = cmd.Wait(); err != nil {
-		if err, ok := err.(*exec.ExitError); ok {
-			if err.ExitCode() != 0 {
-				return fmt.Errorf("fabric installer failed with exit code %d", err.ExitCode())
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if exitErr.ExitCode() != 0 {
+				return fmt.Errorf("fabric installer failed with exit code %d", exitErr.ExitCode())
 			}
 		} else {
 			return fmt.Errorf("error waiting for command: %s", err.Error())
@@ -98,11 +110,11 @@ func (s Fabric) Install(useOwnJava bool) error {
 	pterm.Success.Println("Fabric installed successfully")
 	_ = os.Remove(filepath.Join(s.InstallDir, installerName))
 
-	err = s.startScript(useOwnJava)
-
-	return nil
+	return s.startScript(useOwnJava)
 }
 
+// getInstaller fetches the list of available Fabric installer versions from the
+// Fabric metadata API. The first entry is typically the latest stable version.
 func getInstaller() ([]FabricInstaller, error) {
 	url := fmt.Sprintf("%s/v2/versions/installer", fabricMeta)
 	resp, err := util.DoGet(url)
@@ -120,6 +132,8 @@ func getInstaller() ([]FabricInstaller, error) {
 	return fabricInstaller, nil
 }
 
+// startScript generates a start.sh/start.bat script for the Fabric server with
+// the configured memory settings, Log4J fix flags, and Java path.
 func (s Fabric) startScript(ownJava bool) error {
 	pterm.Debug.Println("Use own java:", ownJava)
 	var runScriptPath string
@@ -136,7 +150,7 @@ func (s Fabric) startScript(ownJava bool) error {
 		pterm.Warning.Printfln("Failed to apply log4j fix: %s", err.Error())
 	}
 
-	runFile, err := os.OpenFile(runScriptPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	runFile, err := os.OpenFile(runScriptPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		return err
 	}
@@ -149,15 +163,19 @@ func (s Fabric) startScript(ownJava bool) error {
 		}
 	}
 	runJarName := "fabric-server-launch.jar"
+	xmx := s.Memory.Recommended
+	if xmx <= 0 {
+		xmx = 4096
+	}
 
 	if runtime.GOOS == "windows" {
-		_, err = runFile.WriteString(fmt.Sprintf("\"%s\" -jar %s -Xmx%dM %s nogui", javaPath, log4jFix, s.Memory.Recommended, runJarName))
+		_, err = runFile.WriteString(fmt.Sprintf("\"%s\" %s -Xmx%dM -jar %s nogui", javaPath, log4jFix, xmx, runJarName))
 		if err != nil {
 			return err
 		}
 	}
 	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
-		_, err = runFile.WriteString(fmt.Sprintf("#!/usr/bin/env sh\n\"%s\" -jar %s -Xmx%dM %s nogui", javaPath, log4jFix, s.Memory.Recommended, runJarName))
+		_, err = runFile.WriteString(fmt.Sprintf("#!/usr/bin/env sh\n\"%s\" %s -Xmx%dM -jar %s nogui", javaPath, log4jFix, xmx, runJarName))
 		if err != nil {
 			return err
 		}

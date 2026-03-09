@@ -2,13 +2,13 @@ package modloaders
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"ftb-server-downloader/structs"
 	"ftb-server-downloader/util"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -18,22 +18,27 @@ import (
 )
 
 const (
+	// forgeMaven is the base URL for the MinecraftForge Maven repository.
 	forgeMaven = "https://maven.minecraftforge.net"
 )
 
 var (
-	jarName          string
+	// versionsToRename lists Minecraft versions where the server JAR must be renamed
+	// from "minecraft_server.<version>.jar" to "minecraft_server.jar" for Forge compatibility.
 	versionsToRename = []string{
 		"1.5.2",
 	}
 )
 
+// Forge implements the ModLoader interface for MinecraftForge-based servers.
 type Forge struct {
 	InstallDir string
 	Targets    structs.ModpackTargets
 	Memory     structs.Memory
 }
 
+// GetForge creates a new Forge instance configured with the given modpack targets,
+// memory settings, and installation directory.
 func GetForge(target structs.ModpackTargets, memory structs.Memory, installDir string) Forge {
 
 	return Forge{
@@ -43,33 +48,68 @@ func GetForge(target structs.ModpackTargets, memory structs.Memory, installDir s
 	}
 }
 
-func (s Forge) GetDownload() ([]structs.File, error) {
-	var mlFiles []structs.File
-	var installerUrl string
-
-	installerUrl = fmt.Sprintf("%s/releases/net/minecraftforge/forge/%s-%s/forge-%s-%s-installer.jar", forgeMaven, s.Targets.McVersion, s.Targets.ModLoader.Version, s.Targets.McVersion, s.Targets.ModLoader.Version)
-	jarName = fmt.Sprintf("forge-%s-%s-installer.jar", s.Targets.McVersion, s.Targets.ModLoader.Version)
-	if !doesForgeExist(installerUrl) {
-		installerUrl = fmt.Sprintf("%s/releases/net/minecraftforge/forge/%s-%s-%s/forge-%s-%s-%s-installer.jar", forgeMaven, s.Targets.McVersion, s.Targets.ModLoader.Version, s.Targets.McVersion, s.Targets.McVersion, s.Targets.ModLoader.Version, s.Targets.McVersion)
-		jarName = fmt.Sprintf("forge-%s-%s-%s-installer.jar", s.Targets.McVersion, s.Targets.ModLoader.Version, s.Targets.McVersion)
-		if !doesForgeExist(installerUrl) {
-			installerUrl = fmt.Sprintf("%s/releases/net/minecraftforge/forge/%s-%s/forge-%s-%s-universal.zip", forgeMaven, s.Targets.McVersion, s.Targets.ModLoader.Version, s.Targets.McVersion, s.Targets.ModLoader.Version)
-			jarName = fmt.Sprintf("forge-%s-%s-universal.zip", s.Targets.McVersion, s.Targets.ModLoader.Version)
-			if !doesForgeExist(installerUrl) {
-				return mlFiles, fmt.Errorf("cant find forge version %s", s.Targets.ModLoader.Version)
-			}
-		}
+// resolveInstaller determines the correct Forge installer URL and filename by probing
+// the Maven repository. It tries three formats in order: modern installer JAR,
+// legacy installer JAR (with MC version suffix), and universal ZIP for very old versions.
+// If InstallerUrl is set on the targets, that is used directly without probing.
+func (s Forge) resolveInstaller() (url, name string, err error) {
+	if s.Targets.InstallerUrl != "" {
+		u := strings.ReplaceAll(s.Targets.InstallerUrl, "{{@loaderversion@}}", s.Targets.ModLoader.Version)
+		u = strings.ReplaceAll(u, "{{@mcversion@}}", s.Targets.McVersion)
+		n := fmt.Sprintf("forge-%s-%s-installer.jar", s.Targets.McVersion, s.Targets.ModLoader.Version)
+		return u, n, nil
 	}
 
-	mlFiles = append(mlFiles, structs.File{
+	u := fmt.Sprintf("%s/releases/net/minecraftforge/forge/%s-%s/forge-%s-%s-installer.jar",
+		forgeMaven, s.Targets.McVersion, s.Targets.ModLoader.Version,
+		s.Targets.McVersion, s.Targets.ModLoader.Version)
+	n := fmt.Sprintf("forge-%s-%s-installer.jar", s.Targets.McVersion, s.Targets.ModLoader.Version)
+	if doesForgeExist(u) {
+		return u, n, nil
+	}
+
+	u = fmt.Sprintf("%s/releases/net/minecraftforge/forge/%s-%s-%s/forge-%s-%s-%s-installer.jar",
+		forgeMaven, s.Targets.McVersion, s.Targets.ModLoader.Version, s.Targets.McVersion,
+		s.Targets.McVersion, s.Targets.ModLoader.Version, s.Targets.McVersion)
+	n = fmt.Sprintf("forge-%s-%s-%s-installer.jar", s.Targets.McVersion, s.Targets.ModLoader.Version, s.Targets.McVersion)
+	if doesForgeExist(u) {
+		return u, n, nil
+	}
+
+	u = fmt.Sprintf("%s/releases/net/minecraftforge/forge/%s-%s/forge-%s-%s-universal.zip",
+		forgeMaven, s.Targets.McVersion, s.Targets.ModLoader.Version,
+		s.Targets.McVersion, s.Targets.ModLoader.Version)
+	n = fmt.Sprintf("forge-%s-%s-universal.zip", s.Targets.McVersion, s.Targets.ModLoader.Version)
+	if doesForgeExist(u) {
+		return u, n, nil
+	}
+
+	return "", "", fmt.Errorf("cant find forge version %s", s.Targets.ModLoader.Version)
+}
+
+// GetDownload resolves the Forge installer URL by trying multiple Maven path formats
+// (modern, legacy with MC version suffix, and universal ZIP for very old versions).
+// Returns the installer file to download, or an error if no valid URL is found.
+func (s Forge) GetDownload() ([]structs.File, error) {
+	installerUrl, jarName, err := s.resolveInstaller()
+	if err != nil {
+		return nil, err
+	}
+	return []structs.File{{
 		Name:               jarName,
 		Url:                installerUrl,
 		CheckContentLength: true,
-	})
-	return mlFiles, nil
+	}}, nil
 }
 
+// Install runs the Forge installer JAR (or extracts a universal ZIP for legacy versions),
+// renames server JARs if needed, and generates a start script. If useOwnJava is true,
+// the bundled JRE is used instead of the system Java.
 func (s Forge) Install(useOwnJava bool) error {
+	_, jarName, err := s.resolveInstaller()
+	if err != nil {
+		return err
+	}
 
 	exists, err := util.PathExists(filepath.Join(s.InstallDir, jarName))
 	if err != nil {
@@ -101,9 +141,10 @@ func (s Forge) Install(useOwnJava bool) error {
 			return fmt.Errorf("error running forge installer: %s", err.Error())
 		}
 		if err = cmd.Wait(); err != nil {
-			if err, ok := err.(*exec.ExitError); ok {
-				if err.ExitCode() != 0 {
-					return fmt.Errorf("forge installer failed with exit code %d, error: %s", err.ExitCode(), err.Error())
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				if exitErr.ExitCode() != 0 {
+					return fmt.Errorf("forge installer failed with exit code %d, error: %s", exitErr.ExitCode(), exitErr.Error())
 				}
 			} else {
 				return fmt.Errorf("error waiting for command: %s", err.Error())
@@ -159,6 +200,8 @@ func (s Forge) Install(useOwnJava bool) error {
 	return nil
 }
 
+// doesForgeExist checks whether a Forge artifact exists at the given URL
+// by performing an HTTP HEAD request.
 func doesForgeExist(url string) bool {
 	resp, err := util.DoHead(url)
 	if err != nil {
@@ -168,6 +211,9 @@ func doesForgeExist(url string) bool {
 	return true
 }
 
+// startScript generates or patches the server start script. If a run.sh/run.bat already
+// exists (created by the Forge installer), it patches in the custom Java path and nogui flag.
+// Otherwise, it creates a new start.sh/start.bat with memory settings and Log4J fixes.
 func (s Forge) startScript(ownJava bool) error {
 	pterm.Debug.Println("Use own java:", ownJava)
 	argsFilePath := filepath.Join(s.InstallDir, "user_jvm_args.txt")
@@ -203,7 +249,7 @@ func (s Forge) startScript(ownJava bool) error {
 			}
 		}
 
-		if !hasXmx {
+		if !hasXmx && s.Memory.Recommended > 0 {
 			argsFile, err = os.OpenFile(argsFilePath, os.O_APPEND|os.O_WRONLY, 0644)
 			if err != nil {
 				return err
@@ -228,24 +274,23 @@ func (s Forge) startScript(ownJava bool) error {
 		for scanner.Scan() {
 			line := scanner.Text()
 
-			match, _ := regexp.MatchString("^(java).+$", line)
-			if match {
+			if javaLineRe.MatchString(line) {
 				if ownJava {
 					pterm.Debug.Println("Replacing java path in run script")
 					javaPath, err := util.GetJavaPath(s.Targets.JavaVersion)
 					if err != nil {
 						return err
 					}
-					line = regexp.MustCompile("^java").
+					line = javaStartRe.
 						ReplaceAllString(line, fmt.Sprintf("\"%s\"", javaPath))
 				}
 
 				if runtime.GOOS == "windows" {
-					line = regexp.MustCompile(`%\*`).
-						ReplaceAllString(line, fmt.Sprintf("%s", "nogui %*"))
+					line = winArgsRe.
+						ReplaceAllString(line, "nogui %*")
 				} else if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
-					line = regexp.MustCompile(`"\$@"`).
-						ReplaceAllString(line, fmt.Sprintf("%s", "nogui \"$@\""))
+					line = unixArgsRe.
+						ReplaceAllString(line, "nogui \"$@\"")
 				}
 			}
 			lines = append(lines, line)
@@ -253,8 +298,8 @@ func (s Forge) startScript(ownJava bool) error {
 
 		_ = file.Close()
 
-		// Rewrite the file with our changes
-		file, _ = os.Create(runScriptPath)
+		// Rewrite the file with our changes, preserving execute permission
+		file, _ = os.OpenFile(runScriptPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
 		defer file.Close()
 
 		writer := bufio.NewWriter(file)
@@ -263,7 +308,7 @@ func (s Forge) startScript(ownJava bool) error {
 		}
 		_ = writer.Flush()
 	} else {
-		runFile, err := os.OpenFile(strings.ReplaceAll(runScriptPath, "run", "start"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+		runFile, err := os.OpenFile(strings.ReplaceAll(runScriptPath, "run", "start"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 		if err != nil {
 			return err
 		}
@@ -283,11 +328,9 @@ func (s Forge) startScript(ownJava bool) error {
 		preForgeJarVer, _ := semVer.NewVersion("1.5.1")
 		mcVer, _ := semVer.NewVersion(s.Targets.McVersion)
 
-		var re *regexp.Regexp
-		if mcVer.GreaterThan(preForgeJarVer) {
-			re = regexp.MustCompile(`^(minecraft)?forge(-universal)?-(\d+.\d+.\d+)-(\d+.\d+.\d+(.\d+)?)(-\d+.\d+.\d+)?(.+)?.jar$`)
-		} else {
-			re = regexp.MustCompile(`^minecraft_server.(\d+.\d+.\d+)?.jar$`)
+		var re = forgeModernJarRe
+		if !mcVer.GreaterThan(preForgeJarVer) {
+			re = forgeLegacyJarRe
 		}
 
 		var filesInDir []pterm.TreeNode
@@ -310,13 +353,13 @@ func (s Forge) startScript(ownJava bool) error {
 		pterm.Debug.Println("Runtime jar file:", runJarName)
 
 		if runtime.GOOS == "windows" {
-			_, err = runFile.WriteString(fmt.Sprintf("\"%s\" -jar %s -Xmx%dM %s nogui", javaPath, log4jFix, s.Memory.Recommended, runJarName))
+			_, err = runFile.WriteString(fmt.Sprintf("\"%s\" %s -Xmx%dM -jar %s nogui", javaPath, log4jFix, s.Memory.Recommended, runJarName))
 			if err != nil {
 				return err
 			}
 		}
 		if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
-			_, err = runFile.WriteString(fmt.Sprintf("#!/usr/bin/env sh\n\"%s\" -jar %s -Xmx%dM %s nogui", javaPath, log4jFix, s.Memory.Recommended, runJarName))
+			_, err = runFile.WriteString(fmt.Sprintf("#!/usr/bin/env sh\n\"%s\" %s -Xmx%dM -jar %s nogui", javaPath, log4jFix, s.Memory.Recommended, runJarName))
 			if err != nil {
 				return err
 			}
